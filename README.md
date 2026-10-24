@@ -211,16 +211,13 @@ python scripts/benchmark_agent.py `
   --output results/student_validation.json
 ```
 
-Không thêm `--time-ms` trong cấu hình tổng budget thông thường. Chỉ dùng tham
-số đó nếu đề bài yêu cầu thêm một giới hạn cứng cho từng nước.
+Không thêm `--time-ms` trong cấu hình tổng budget thông thường. Chỉ dùng tham số đó nếu đề bài yêu cầu thêm một giới hạn cứng cho từng nước.
 
 ## Mốc điểm Boss 0–2
 
-Repository public chỉ có Boss 0 Random để kiểm tra API. Source Boss 1–4 được giữ
-riêng bởi giảng viên; sinh viên nhận kết quả tham khảo của Boss 0–2.
+Repository public chỉ có Boss 0 Random để kiểm tra API. Source Boss 1–4 được giữ riêng bởi giảng viên; sinh viên nhận kết quả tham khảo của Boss 0–2.
 
-Protocol: seed 42, bàn 4×4, tối đa 60 giây tổng thời gian suy nghĩ, không có
-giới hạn cố định mỗi nước.
+Protocol: seed 42, bàn 4×4, tối đa 60 giây tổng thời gian suy nghĩ, không có giới hạn cố định mỗi nước.
 
 | Mốc | Điểm | Tile lớn nhất | Số bước |
 |---|---:|---:|---:|
@@ -228,10 +225,7 @@ giới hạn cố định mỗi nước.
 | Boss 1 | 2.032 | 128 | 189 |
 | Boss 2 | 7.448 | 512 | 518 |
 
-Đây là kết quả tham khảo trên một seed để định hướng, không phải ngưỡng điểm
-bắt buộc và không phải ước lượng thống kê trên nhiều seed. Điểm của Boss 3 và
-Boss 4 chưa được công bố và sẽ được thông báo sau. Chấm chính thức vẫn dùng
-trung bình điểm 2048 trên hidden seed.
+Đây là kết quả tham khảo trên một seed để định hướng, không phải ngưỡng điểm bắt buộc và không phải ước lượng thống kê trên nhiều seed. Điểm của Boss 3 và Boss 4 chưa được công bố và sẽ được thông báo sau. Chấm chính thức vẫn dùng trung bình điểm 2048 trên hidden seed.
 
 Sinh viên không bắt buộc đánh bại Final Boss. Điểm được xác định bằng metric
 chung, không phải bằng một trận đối kháng trực tiếp với Boss.
@@ -239,8 +233,7 @@ chung, không phải bằng một trận đối kháng trực tiếp với Boss.
 ## Bài nộp
 
 Sinh viên nộp toàn bộ thư mục `student/`, tối thiểu phải có `student/agent.py`.
-Nếu `agent.py` import thêm `heuristic.py`, `search.py` hoặc file dữ liệu thì phải
-nộp kèm các file đó. Không cần nộp engine, UI, tests hay thư mục `results/`.
+Nếu `agent.py` import thêm `heuristic.py`, `search.py` hoặc file dữ liệu thì phải nộp kèm các file đó. Không cần nộp engine, UI, tests hay thư mục `results/`.
 
 ## Quy định kỹ thuật
 
@@ -253,8 +246,7 @@ nộp kèm các file đó. Không cần nộp engine, UI, tests hay thư mục `
 - mọi dependency bổ sung phải được giảng viên cho phép;
 - bài nộp phải tái lập được khi nhận cùng trạng thái và cùng seed nội bộ.
 
-Nếu agent trả nước sai, phát sinh exception hoặc vượt tổng budget, benchmark sẽ
-dừng ván và ghi nguyên nhân vào kết quả.
+Nếu agent trả nước sai, phát sinh exception hoặc vượt tổng budget, benchmark sẽ dừng ván và ghi nguyên nhân vào kết quả.
 
 ## Kiểm tra trước khi nộp
 
@@ -275,5 +267,4 @@ Checklist:
 
 ## License và sử dụng
 
-Project phục vụ giảng dạy và chấm bài giữa kỳ. Giảng viên quyết định phạm vi mã
-nguồn được phát cho sinh viên và quy định nộp bài áp dụng cho từng lớp.
+Project phục vụ giảng dạy và chấm bài giữa kỳ. Giảng viên quyết định phạm vi mã nguồn được phát cho sinh viên và quy định nộp bài áp dụng cho từng lớp.
