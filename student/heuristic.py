@@ -8,12 +8,93 @@ from game2048.rules import legal_moves, move_board
 from game2048.types import Move
 
 
+TUNED_WEIGHTS = {
+    "empty": 650.0,
+    "largest_tile": 26.0,
+    "merge_score": 11.5,
+    "corner_value": 240.0,
+    "corner_bonus": 2800.0,
+    "corner_penalty": 1900.0,
+    "smoothness": 20.5,
+    "monotonicity": 54.0,
+    "merge_potential": 32.0,
+    "chain_potential": 18.5,
+    "snake": 14.0,
+    "isolated_penalty": 0.9,
+    "empty_corner": 12.0,
+}
+
+
 def _snake_weights() -> list[int]:
-    return [4, 3, 2, 1, 2, 3, 4, 5, 5, 4, 3, 2, 3, 2, 1, 2]
+    return [
+        4, 3, 2, 1,
+        3, 2, 1, 2,
+        2, 1, 2, 3,
+        1, 2, 3, 4,
+    ]
+
+
+def _corner_matrix() -> np.ndarray:
+    return np.array(
+        [
+            [65536, 32768, 16384, 8192],
+            [32768, 16384, 8192, 4096],
+            [16384, 8192, 4096, 2048],
+            [8192, 4096, 2048, 1024],
+        ],
+        dtype=np.float64,
+    )
+
+
+def _line_monotonicity(values: list[int]) -> int:
+    if len(values) < 2:
+        return 0
+    inc = sum(1 for a, b in zip(values, values[1:]) if b >= a)
+    dec = sum(1 for a, b in zip(values, values[1:]) if b <= a)
+    return max(inc, dec)
+
+
+def _empty_corner_bonus(board: np.ndarray) -> float:
+    bonus = 0.0
+    for r, c in ((0, 0), (0, 3), (3, 0), (3, 3)):
+        if board[r, c] == 0:
+            bonus -= 60.0
+    for r, c in ((0, 1), (1, 0), (0, 2), (2, 0), (1, 1), (2, 2), (3, 2), (2, 3), (1, 3), (3, 1)):
+        if board[r, c] == 0:
+            bonus += 8.0
+    return bonus * TUNED_WEIGHTS["empty_corner"]
+
+
+def _merge_chain_potential(board: np.ndarray) -> float:
+    potential = 0.0
+    for r in range(4):
+        for c in range(4):
+            value = int(board[r, c])
+            if value == 0:
+                continue
+            chain = 0
+            for dc in (1, -1):
+                rr, cc = r, c
+                while 0 <= rr < 4 and 0 <= cc < 4:
+                    cc += dc
+                    if 0 <= cc < 4 and board[rr, cc] == value:
+                        chain += 1
+                    else:
+                        break
+            for dr in (1, -1):
+                rr, cc = r, c
+                while 0 <= rr < 4 and 0 <= cc < 4:
+                    rr += dr
+                    if 0 <= rr < 4 and board[rr, cc] == value:
+                        chain += 1
+                    else:
+                        break
+            if chain > 0:
+                potential += value * (chain / 4.0)
+    return potential
 
 
 def evaluate_board(board: np.ndarray, merge_score: int = 0) -> float:
-    """Heuristic chấm giá trị bàn cờ 2048 theo nhiều yếu tố cùng lúc."""
     board = np.asarray(board, dtype=np.int64)
     if board.size == 0:
         return 0.0
@@ -25,68 +106,77 @@ def evaluate_board(board: np.ndarray, merge_score: int = 0) -> float:
     empty_cells = int(np.count_nonzero(board == 0))
     corners = [int(board[0, 0]), int(board[0, 3]), int(board[3, 0]), int(board[3, 3])]
     corner_value = max(corners)
+    corner_matrix = _corner_matrix()
 
-    # 1) Không gian trống và tile lớn
-    score = 220.0 * empty_cells + 32.0 * largest_tile + 12.0 * merge_score
-
-    # 2) Ưu tiên giữ tile lớn ở góc
-    score += 150.0 * corner_value
+    score = 0.0
+    score += float(np.sum(board * corner_matrix)) * 0.12
+    score += TUNED_WEIGHTS["empty"] * empty_cells + TUNED_WEIGHTS["largest_tile"] * largest_tile + TUNED_WEIGHTS["merge_score"] * merge_score
+    score += TUNED_WEIGHTS["corner_value"] * corner_value
     if largest_tile in corners:
-        score += 500.0
+        score += TUNED_WEIGHTS["corner_bonus"]
+    else:
+        score -= TUNED_WEIGHTS["corner_penalty"]
+    score += _empty_corner_bonus(board)
 
-    # 3) Smoothness: board càng mượt càng tốt.
     smoothness = 0.0
-    for i in range(4):
-        for j in range(4):
-            value = int(board[i, j])
+    for r in range(4):
+        for c in range(4):
+            value = int(board[r, c])
             if value == 0:
                 continue
-            for di, dj in ((1, 0), (0, 1)):
-                ni, nj = i + di, j + dj
-                if 0 <= ni < 4 and 0 <= nj < 4:
-                    other = int(board[ni, nj])
+            for dr, dc in ((1, 0), (0, 1)):
+                rr = r + dr
+                cc = c + dc
+                if 0 <= rr < 4 and 0 <= cc < 4:
+                    other = int(board[rr, cc])
                     if other != 0:
-                        smoothness -= abs(math.log2(value) - math.log2(other))
-    score += 40.0 * smoothness
+                        smoothness -= abs(math.log2(value) - math.log2(other)) * min(value, other)
+    score += TUNED_WEIGHTS["smoothness"] * smoothness
 
-    # 4) Monotonicity: các đường hàng/cột có xu hướng sắp xếp gọn.
     monotonicity = 0.0
-    for line in [board[i, :] for i in range(4)] + [board[:, j] for j in range(4)]:
-        values = [int(v) for v in line if v > 0]
-        if len(values) < 2:
-            continue
-        inc = 0
-        dec = 0
-        for a, b in zip(values, values[1:]):
-            if b >= a:
-                inc += 1
-            if b <= a:
-                dec += 1
-        monotonicity += max(inc, dec) * 30.0
-    score += monotonicity
+    for row in board:
+        values = [int(v) for v in row if v > 0]
+        monotonicity += _line_monotonicity(values)
+    for col in board.T:
+        values = [int(v) for v in col if v > 0]
+        monotonicity += _line_monotonicity(values)
+    score += TUNED_WEIGHTS["monotonicity"] * monotonicity
 
-    # 5) Merge potential: ưu tiên những ô tạo khả năng gộp tiếp.
     merge_potential = 0
-    for i in range(4):
-        for j in range(4):
-            value = int(board[i, j])
+    for r in range(4):
+        for c in range(4):
+            value = int(board[r, c])
             if value == 0:
                 continue
-            if i + 1 < 4 and board[i + 1, j] == value:
+            if r + 1 < 4 and board[r + 1, c] == value:
                 merge_potential += value
-            if j + 1 < 4 and board[i, j + 1] == value:
+            if c + 1 < 4 and board[r, c + 1] == value:
                 merge_potential += value
-    score += 20.0 * merge_potential
+    score += TUNED_WEIGHTS["merge_potential"] * merge_potential + TUNED_WEIGHTS["chain_potential"] * _merge_chain_potential(board)
 
-    # 6) Snake pattern: ưu tiên sắp xếp theo mô hình điềm tĩnh ở góc.
     snake = _snake_weights()
     snake_score = 0.0
     for idx, weight in enumerate(snake):
         r = idx // 4
         c = idx % 4
         snake_score += int(board[r, c]) * weight
-    score += 0.7 * snake_score
+    score += TUNED_WEIGHTS["snake"] * snake_score
 
+    isolated_penalty = 0
+    for r in range(4):
+        for c in range(4):
+            value = int(board[r, c])
+            if value < 64:
+                continue
+            neighbors = 0
+            for dr, dc in ((1, 0), (-1, 0), (0, 1), (0, -1)):
+                rr = r + dr
+                cc = c + dc
+                if 0 <= rr < 4 and 0 <= cc < 4 and board[rr, cc] != 0:
+                    neighbors += 1
+            if neighbors == 0:
+                isolated_penalty += value
+    score -= TUNED_WEIGHTS["isolated_penalty"] * isolated_penalty
     return float(score)
 
 
@@ -95,7 +185,6 @@ def choose_best_move(
     legal: tuple[Move, ...],
     max_depth: int = 2,
 ) -> Move:
-    """Chọn move tốt nhất bằng heuristic + shallow search (1 bước xem trước)."""
     if not legal:
         raise ValueError("Không có nước hợp lệ để chọn")
 
