@@ -10,7 +10,9 @@ import time
 
 import numpy as np
 
+import student.search as search_module
 from game2048.observation import Observation
+from game2048.rules import move_board
 from game2048.types import Move
 from student.heuristic import evaluate_board
 from student.search import shallow_search_best_move
@@ -19,6 +21,10 @@ from student.search import shallow_search_best_move
 class Agent:
     # Đổi tên này thành tên đội; nó sẽ xuất hiện trong UI và file kết quả.
     name = "heuristic-2048"
+
+    def __init__(self):
+        self.last_nodes = 0
+        self.last_completed_depth = 0
 
     def reset(self, seed: int | None = None) -> None:
         """Xóa cache/trạng thái giữa hai ván nếu thuật toán của bạn có dùng."""
@@ -33,49 +39,63 @@ class Agent:
         if not obs.legal_moves:
             raise ValueError("choose_move được gọi ở trạng thái kết thúc")
 
-        # Chia thời gian hợp lý theo số ô trống: giai đoạn đầu cần nhanh, cần tìm trước khi bàn đầy.
-        empty_count = int(np.count_nonzero(obs.board == 0))
-        max_tile = int(obs.board.max())
+        board = obs.board
+        empty_count = int(np.count_nonzero(board == 0))
+        max_tile = int(board.max())
 
         if empty_count >= 14:
-            depth = 5
-            move_budget = min(time_limit_ms * 0.55, 35.0)
-        elif empty_count >= 8:
-            depth = 4
-            move_budget = min(time_limit_ms * 0.45, 28.0)
-        elif empty_count >= 4:
-            depth = 4
-            move_budget = min(time_limit_ms * 0.35, 22.0)
+            phase = "early"
+        elif empty_count >= 7:
+            phase = "mid"
         else:
+            phase = "late"
+
+        if phase == "early":
+            depth = 4
+            move_budget = min(time_limit_ms * 0.75, 40.0)
+        elif phase == "mid":
             depth = 5
-            move_budget = min(time_limit_ms * 0.30, 18.0)
+            move_budget = min(time_limit_ms * 0.70, 32.0)
+        else:
+            depth = 6
+            move_budget = min(time_limit_ms * 0.68, 28.0)
 
         if max_tile >= 1024:
             depth += 1
-            move_budget = min(time_limit_ms * 0.6, 32.0)
+            move_budget = min(time_limit_ms * 0.78, 36.0)
+        if max_tile >= 2048:
+            depth += 1
+            move_budget = min(time_limit_ms * 0.82, 40.0)
 
-        # Không dùng hết khoản thời gian ở nước đầu, để có thời gian cho phần sau của ván.
+        if empty_count <= 4:
+            depth += 1
+            move_budget = min(time_limit_ms * 0.72, 30.0)
+
         if obs.move_count <= 2:
             depth = 3
-            move_budget = min(move_budget, 8.0)
+            move_budget = min(move_budget, 10.0)
 
         start = time.time()
-        move = shallow_search_best_move(
-            obs.board,
-            obs.legal_moves,
-            depth=depth,
-            heuristic_fn=evaluate_board,
-            time_limit_ms=move_budget,
-        )
+        try:
+            move = shallow_search_best_move(
+                board,
+                obs.legal_moves,
+                depth=depth,
+                heuristic_fn=evaluate_board,
+                time_limit_ms=move_budget,
+            )
+        except Exception:
+            move = obs.legal_moves[0]
+        finally:
+            self.last_nodes = search_module.LAST_NODES
+            self.last_completed_depth = search_module.LAST_COMPLETED_DEPTH
 
         elapsed_ms = (time.time() - start) * 1000.0
         if elapsed_ms > time_limit_ms * 0.95:
-            # Nếu gần hết budget, fallback to safest legal move by heuristic instead of risking timeout.
             best_move = None
             best_score = float("-inf")
             for candidate in obs.legal_moves:
-                from game2048.rules import move_board
-                next_board, merge_score, changed = move_board(obs.board, candidate)
+                next_board, merge_score, changed = move_board(board, candidate)
                 if not changed:
                     continue
                 value = evaluate_board(next_board, merge_score)
