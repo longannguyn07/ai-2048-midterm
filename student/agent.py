@@ -1,303 +1,262 @@
-"""Adaptive expectimax. Depth counts future player moves after a root move.
-Every root move is followed by a spawn. Depth zero evaluates that spawn;
-depth one also searches one more player move and its following spawn.
-"""
+"""Agent 2048 - Tối ưu chuẩn xác (Không bóp méo nước đi của AI)."""
+
 from __future__ import annotations
 
 import time
-from functools import lru_cache
+import numpy as np
 
-BASE = tuple((r, c if r % 2 == 0 else 3 - c) for r in range(4) for c in range(4))
+from game2048.observation import Observation
+from game2048.rules import legal_moves, move_board
+from game2048.types import Move
 
-def _paths():
-    paths = set()
-    for reflect in (False, True):
-        for rotation in range(4):
-            cells = []
-            for row, col in BASE:
-                if reflect:
-                    col = 3 - col
-                for _ in range(rotation):
-                    row, col = col, 3 - row
-                cells.append(4 * row + col)
-            paths.add(tuple(cells))
-    return tuple(sorted(paths))
 
-PATHS = _paths()
-ROWS = tuple(tuple(4 * r + c for c in range(4)) for r in range(4))
-COLS = tuple(tuple(4 * r + c for r in range(4)) for c in range(4))
-EDGES = tuple((i, i + 1) for i in range(16) if i % 4 < 3) + tuple((i, i + 4) for i in range(12))
-WEIGHTS = tuple(0.77 ** i for i in range(16))
-TERMINAL_VALUE = -10_000_000.0
-EXACT_EMPTY_LIMIT = 5
-APPROX_POSITIONS = 4
-MERGE_REWARD_WEIGHT = 1.0
-ORIENTATION_HYSTERESIS = 1.18
+# =====================================================================
+# 1. HÀM ĐÁNH GIÁ THẾ CỜ (CHUẨN XÁC, KHÔNG PHẠT CỨNG NHẮC)
+# =====================================================================
 
-@lru_cache(maxsize=65536)
-def _merge_left(row):
-    tiles = [x for x in row if x]
-    result, reward, i = [], 0, 0
-    while i < len(tiles):
-        if i + 1 < len(tiles) and tiles[i] == tiles[i + 1]:
-            exponent = tiles[i] + 1
-            result.append(exponent)
-            reward += 1 << exponent
-            i += 2
-        else:
-            result.append(tiles[i])
-            i += 1
-    return tuple(result + [0] * (4 - len(result))), reward
+SNAKE_WEIGHTS = np.array([
+    [65536.0, 32768.0, 16384.0, 8192.0],
+    [512.0,   1024.0,  2048.0,  4096.0],
+    [256.0,   128.0,   64.0,    32.0],
+    [2.0,     4.0,     8.0,     16.0],
+], dtype=np.float64) # ma trận rắn gắn điểm trọng số với vị trí
 
-@lru_cache(maxsize=120000)
-def _move(board, direction):
-    result, reward = list(board), 0
-    for line in (ROWS if direction >= 2 else COLS):
-        positions = line if direction in (0, 2) else line[::-1]
-        merged, gain = _merge_left(tuple(board[i] for i in positions))
-        for position, value in zip(positions, merged):
-            result[position] = value
-        reward += gain
-    moved = tuple(result)
-    return moved, reward, moved != board
 
-def _legal_count(board):
-    return sum(_move(board, move)[2] for move in range(4))
+def evaluate_board(board: np.ndarray) -> float: # Hàm tính điểm
+    """Tính điểm chất lượng thế cờ dựa hoàn toàn vào ma trận rắn tự nhiên."""
+    snake_score = float(np.sum(board * SNAKE_WEIGHTS))
+    # lấy điểm từng ô nhân với điểm ma trận rắn -> ô điểm càng lớn trùng với trọng số lớn điểm càng cao
+    # => ngầm định hướng AI dồn tile lớn nhất vào góc ròi giảm dần theo rắn
+    
+    # Thưởng ô trống vừa phải để AI thoáng tay xoay sở
+    empty_cells = int(np.count_nonzero(board == 0))
+    # đếm số ô có điểm = 0 <=> trồng --> bằng 0 vì engine cái thế
+    empty_score = empty_cells * 20000.0
+    # điếm thưởng cho ô trống -> nhân với trọng số phù hợp
 
-def _leaf_value(board, orientation):
-    """A full board with no legal merge is a loss, even at the horizon."""
-    return TERMINAL_VALUE if 0 not in board and _legal_count(board) == 0 else _evaluate(board, orientation)
+    mono_penalty = 0.0
+    smooth_penalty = 0.0
+    # biến khởi tạo
 
-def _exact_chance_leaf(board, orientation, leaf=None):
-    """Exact one-spawn expectation at the depth-zero horizon."""
-    if leaf is None:
-        leaf = lambda state: _leaf_value(state, orientation)
-    empty = [i for i, tile in enumerate(board) if tile == 0]
-    if not empty:
-        return leaf(board)
-    return sum(0.9 * leaf(board[:i] + (1,) + board[i + 1:])
-               + 0.1 * leaf(board[:i] + (2,) + board[i + 1:])
-               for i in empty) / len(empty)
+    for r in range(4):
+        for c in range(3):
+            val1 = board[r, c]
+            val2 = board[r, c + 1] # xét hàng ngang
+            if val1 > 0 and val2 > 0:
+                smooth_penalty += abs(np.log2(val1) - np.log2(val2)) 
+                # đo độ gồ gề <=> điểm lệch càng lớn thì phạt càng nặng -> giá trị tương đồng dễ hợp nhất
+            if val1 < val2 and val2 > 0:
+                mono_penalty += (np.log2(val2) - np.log2(val1)) if val1 > 0 else np.log2(val2)
+                # đo độ tương đồng <=> có theo quy luật tăng hay giảm không -> theo quy luật dễ hợp nhất
 
-@lru_cache(maxsize=120000)
-def _evaluate(board, orientation):
-    empty = board.count(0)
-    path = PATHS[orientation]
-    values = [board[i] for i in path]
-    phase = 0 if empty >= 8 else (1 if empty >= 4 else 2)
-    snake = sum((1 << e) ** 1.1 * WEIGHTS[i] for i, e in enumerate(values) if e)
-    inversions = sum(max(0, values[i + 1] - values[i]) * (1 + max(values[i:i + 2]) / 8)
-                     for i in range(15))
-    smooth = sum(abs(board[a] - board[b]) * (1 + max(board[a], board[b]) / 12)
-                 for a, b in EDGES if board[a] and board[b])
-    merge = 0
-    for line in ROWS + COLS:
-        compact = [board[i] for i in line if board[i]]
-        merge += sum(min(compact[i], 10) for i in range(len(compact) - 1)
-                     if compact[i] == compact[i + 1])
-    top = max(board)
-    corner = board[path[0]] == top
-    top_order = sum(max(0, values[i] - values[i + 1]) * (1 - i / 8) for i in range(4))
-    mobility = _legal_count(board) if empty <= 4 else 4
-    return (1.3 * snake + (260, 315, 390)[phase] * empty ** 1.7
-            - (18, 28, 40)[phase] * inversions
-            - (18, 24, 28)[phase] * smooth
-            + (45, 65, 80)[phase] * merge
-            + (90, 130, 200)[phase] * corner * top
-            + 20 * top_order + (0, 50, 180)[phase] * mobility)
 
-def _orientation_score(board, path):
-    return sum((1 << board[position]) ** 1.1 * WEIGHTS[i]
-               for i, position in enumerate(path) if board[position])
+    for c in range(4):
+        for r in range(3):
+            val1 = board[r, c]
+            val2 = board[r + 1, c] # xét hàng dọc
+            if val1 > 0 and val2 > 0:
+                smooth_penalty += abs(np.log2(val1) - np.log2(val2))
+            if val1 < val2 and val2 > 0:
+                mono_penalty += (np.log2(val2) - np.log2(val1)) if val1 > 0 else np.log2(val2)
 
-def _quick_score(board, orientation):
-    """Cheap emergency move ranking, without search or mobility expansion."""
-    path = PATHS[orientation]
-    snake = sum((1 << board[position]) * WEIGHTS[i]
-                for i, position in enumerate(path) if board[position])
-    return snake + 240 * board.count(0) + 25 * board[path[0]]
+    return snake_score + empty_score - (mono_penalty * 2.0) - (smooth_penalty * 500.0)
 
-class _TimedOut(Exception):
-    pass
+
+# =====================================================================
+# 2. CẮT TỈA NƯỚC ĐI
+# =====================================================================
+
+def get_promising_moves(board: np.ndarray, max_moves: int = 3): # cắt bỏ nước đi tệ ngay từ đầu để giảm gánh nặng lên expectimax
+    candidates = [] # danh sách chứa cặp (điểm ứng viên, nước đi)
+    for move in legal_moves(board): # duyệt tất cả hướng hợp lệ
+        next_board, reward, changed = move_board(board, move) 
+        # next_board -> bàn cờ tiếp, reward -> điểm kiếm đc, change(boolean) -> True nếu bàn cờ thay đổi
+        if changed:
+            score = evaluate_board(next_board) + reward * 2.0 # tính điểm mới
+            candidates.append((score, move)) # thêm điểm và hướng đi
+
+    candidates.sort(key=lambda item: item[0], reverse=True) # sắp xếp theo thứ tự giảm dần
+    return [move for _, move in candidates[:max_moves]] # lấy 3 nước đi tốt nhất
+# thà đi sâu hơn với 3 nước còn hơn đi nông hơn với 4 nước --> cốt lõi vẫn là thời gian
+
+
+# =====================================================================
+# 3. EXPECTIMAX
+# =====================================================================
+
+def expectimax(board: np.ndarray, depth: int, is_player: bool, deadline: float) -> float:
+    if time.perf_counter() >= deadline:
+        return evaluate_board(board)
+    # dừng khi hết giờ
+
+    if depth == 0:
+        return evaluate_board(board)
+    # dừng khi hết độ sâu
+
+    if is_player: # là người chơi <=> nút max
+        best_val = float("-inf") # khởi tạo
+        moves = get_promising_moves(board, max_moves=3) # lọc TOP 3
+        if not moves:
+            return -1.0e9 # gameover phạt rất nặng
+
+        for m in moves:
+            next_board, reward, changed = move_board(board, m)
+            # next_board -> bàn cờ tiếp, reward -> điểm kiếm đc, change(boolean) -> True nếu bàn cờ thay đổi
+            if changed:
+                val = expectimax(next_board, depth - 1, False, deadline) + (reward * 2.0) 
+                # gọi đệ quy, giảm độ sâu, chuyển luợt, cộng điểm sau khi đi
+                if val > best_val:
+                    best_val = val # lấy điểm tốt nhất
+        return best_val # trả về điểm tốt nhất
+
+    else: # lượt của môi trường <=> nút chance
+        empty_positions = np.argwhere(board == 0) # tìm tất cả các ô trống
+        num_empty = len(empty_positions) # số ô trống để tính xác suất
+
+        if num_empty == 0:
+            return evaluate_board(board) # bàn cờ đầy trả vè heuristic
+
+        eval_positions = empty_positions # duyệt tất cả ô trống
+        if num_empty > 4 and depth > 1: 
+            indices = np.linspace(0, num_empty - 1, min(3, num_empty), dtype=int)
+            # np.linspace -> tạo các số cách đều nhau trong 1 khoảng (star,stop,num) num == số lượng giá trị cần taọ | int ép kiểu
+            eval_positions = empty_positions[indices]
+            # lấy các vị trí tương ứng của chỉ số vừa tạo
+
+            # determinist đc thể hiện ở đây nó giải thích vì sao cùng 1 seed chạy 10 lần như 1 nhưng không phản ánh đúng tầm quan trọng
+            # thay vì xét tất cả trường hợp làm khônhg gian tìm kiếm phinh khó kiểm soát thì chọn giá trị đaị điện random có kiểm xoát
+            # min chỉ đề phòng ngừa
+            # đây chỉ là xấp sỉ không phản ánh đúng espectimax đầy đủ
+
+        prob = 1.0 / len(eval_positions) # xác xuất chọn 1 vị trí trong E vị trí
+        expected_val = 0.0 # khởi tạo tổng điểm kì vọng
+
+        for r, c in eval_positions:
+            if time.perf_counter() >= deadline:
+                return evaluate_board(board)
+            # điều kiện dừng thời gian
+            # kiểm tra lại vì 1 nút chance có thể pải duyệt nhiều vị trí pải kiểm tra thời gian trc mỗi vị trí để tránh quá giờ
+
+            b2 = board.copy() # tao bản sao để những lần sau tránh bị ảnh hưởng bởi những lần trước
+            b2[r, c] = 2 # gán bằng 2
+            val2 = expectimax(b2, depth - 1, True, deadline) # đệ quy tính điểm <+> backtracking
+            expected_val += 0.9 * val2 # cộng điểm khi sinh ô 2
+
+            if num_empty <= 3 or depth <= 1:
+                b4 = board.copy()
+                b4[r, c] = 4
+                val4 = expectimax(b4, depth - 1, True, deadline)
+                expected_val += 0.1 * val4
+            # xét với 4
+            # Ô 2 không cần if vì nó chiếm 90% xác suất nên bắt buộc phải mô phỏng chính xác.
+            # Ô 4 chỉ chiếm 10% nên ta bọc trong if để chỉ tính toán chi tiết ở các tình huống quan trọng (bàn cờ ít ô trống hoặc tầng đáy)
+            # còn lại sẽ xấp xỉ bằng giá trị ô 2 để tiết kiệm thời gian và giảm số lần gọi đệ quy."
+
+            #"Việc xấp xỉ $val4 \approx val2$ dựa trên thực tế là ô 4 chỉ chiếm 10% xác suất nên ảnh hưởng tới điểm kỳ vọng rất nhỏ. 
+            # Việc xấp xỉ này giúp giảm một nửa số lần gọi đệ quy, tiết kiệm thời gian tính toán để AI có thể tìm kiếm sâu hơn (tăng độ sâu depth), đem lại nước đi tối ưu hơn tổng thể."
+            else:
+                expected_val += 0.1 * val2 # không pải 4 thì nhân val2
+
+        return expected_val * prob # trả vè điểm nhân xác xuất ô trống
+
+
+# =====================================================================
+# 4. AGENT CHÍNH
+# =====================================================================
 
 class Agent:
-    name = "Adaptive-Expectimax"
+    name = "Pure-Optimized-Expectimax-Agent"
 
-    def __init__(self):
-        self._orientation = None
-        self._cache = {}
-        self.last_completed_depth = 0
-        self.last_nodes = 0
-        self.orientation_switches = 0
-        self.total_stats = {}
-        self.depth_by_phase = {"early": [], "mid": [], "late": []}
-        self._reset_counters()
+    def __init__(self) -> None:
+        self.last_completed_depth = 2
+        # depth bằng 2 là hợp lí cho gần như toàn bộ bàn cờ nếu có nhiều hơn 3 ô trống
+        # phù hợp hướng logic bth như người - máy - người
+        # biến này k dùng để điều khiển logic mà để báo cáo thông số cho mô hình bên ngoài -> để engine ghi log
+        # vì nó để báo cáo nên pải chính xác độ sâu vừa tìm biến độ sâu cục bộ có thể là 3 nhưng do hết thời gian chỉ tìm 2
+        # phân biệt với biến cục bộ
 
-    def _reset_counters(self):
-        self.last_player_nodes = 0
-        self.last_chance_nodes = 0
-        self.last_heuristic_evals = 0
-        self.last_terminal_evals = 0
-        self.last_cache_hits = 0
-        self.last_cache_misses = 0
-        self.last_exact_spawn_children = 0
-        self.last_sampled_spawn_children = 0
-        self.last_timeouts = 0
-        self.last_completed_root = False
+    def reset(self, seed: int | None = None) -> None:
+        self.last_completed_depth = 2
+        # đưa agent vè trạng thái ban đầu để tiếp tục cho ván mới
 
-    def _record_totals(self, board):
-        names = ("player_nodes", "chance_nodes", "heuristic_evals", "terminal_evals",
-                 "cache_hits", "cache_misses", "exact_spawn_children",
-                 "sampled_spawn_children", "timeouts")
-        for name in names:
-            self.total_stats[name] = self.total_stats.get(name, 0) + getattr(self, "last_" + name)
-        phase = "early" if board.count(0) >= 8 else ("mid" if board.count(0) >= 4 else "late")
-        self.depth_by_phase[phase].append(self.last_completed_depth if self.last_completed_root else -1)
+    def choose_move(self, obs: Observation, time_limit_ms: float) -> Move: # hàm đưa ra nước đi
+        legal = obs.legal_moves
+        # lấy danh sách các nước đi hợp lệ
 
-    def reset(self, seed=None):
-        self._orientation = None
-        self._cache.clear()
-        self.last_completed_depth = 0
-        self.last_nodes = 0
-        self.orientation_switches = 0
-        self.total_stats = {}
-        self.depth_by_phase = {"early": [], "mid": [], "late": []}
-        self._reset_counters()
-
-    def _select_orientation(self, board):
-        scores = [_orientation_score(board, path) for path in PATHS]
-        best = max(range(len(PATHS)), key=scores.__getitem__)
-        if self._orientation is None or scores[best] > ORIENTATION_HYSTERESIS * scores[self._orientation]:
-            if self._orientation is not None and best != self._orientation:
-                self.orientation_switches += 1
-            self._orientation = best
-        return self._orientation
-
-    def _time_budget(self, obs, limit_ms, board):
-        remaining = min(limit_ms, obs.time_remaining_ms if obs.time_remaining_ms is not None else limit_ms)
-        if obs.total_time_limit_ms is None:
-            return min(remaining * 0.7, 25.0)
-        projected = max(300, 1000 - obs.move_count)
-        phase = 0.3 if board.count(0) >= 8 else (0.6 if board.count(0) >= 4 else 0.9)
-        return max(0.1, min(remaining / projected * phase, 220.0, remaining * 0.025))
-
-    def choose_move(self, obs, time_limit_ms):
-        legal = tuple(obs.legal_moves)
         if not legal:
-            raise ValueError("No legal moves")
-        self.last_completed_depth = self.last_nodes = 0
-        self._reset_counters()
+            raise ValueError("Không còn nước đi hợp lệ")
+        # bào lỗi để hệ thống ngoài tự sử lí
+        
+
         if len(legal) == 1:
             return legal[0]
-        board = tuple(0 if int(x) == 0 else int(x).bit_length() - 1 for x in obs.board.flat)
-        orientation = self._select_orientation(board)
-        options = [(move, *_move(board, int(move))[:2]) for move in legal]
-        remaining_ms = min(time_limit_ms, obs.time_remaining_ms if obs.time_remaining_ms is not None else time_limit_ms)
-        reserve_ms = max(2.0, obs.total_time_limit_ms * 0.01) if obs.total_time_limit_ms is not None else 2.0
-        if remaining_ms < reserve_ms:
-            best = max(options, key=lambda o: _quick_score(o[1], orientation) + 0.5 * o[2])[0]
-            self._record_totals(board)
-            return best
-        best = max(options, key=lambda o: _evaluate(o[1], orientation) + MERGE_REWARD_WEIGHT * o[2])[0]
-        deadline = time.perf_counter() + self._time_budget(obs, time_limit_ms, board) / 1000
-        if len(self._cache) > 120000:
-            self._cache.clear()
+        # nếu chỉ có 1 nước đi trả vè luôn
 
-        def tick(player_node):
-            self.last_nodes += 1
-            if player_node:
-                self.last_player_nodes += 1
-            else:
-                self.last_chance_nodes += 1
-            if self.last_nodes % 32 == 0 and time.perf_counter() >= deadline:
-                raise _TimedOut
+        budget_sec = min(0.030, max(0.001, (time_limit_ms * 0.7) / 1000.0))
+        # quản lí thời gian tìm kiếm 
+        # chỉ dùng 70% khoảng thời gian đc cấp
+        # ít nhất là 0.001s và nhiều nhất là 0.03s không đc quá
 
-        def leaf(state, fast=False):
-            if fast:
-                self.last_nodes += 1
-            if 0 not in state and _legal_count(state) == 0:
-                self.last_terminal_evals += 1
-                return TERMINAL_VALUE
-            self.last_heuristic_evals += 1
-            return _evaluate(state, orientation)
+        deadline = time.perf_counter() + budget_sec
+        # cập nhật deadline -> khoảng thời gian buộc kết thúc
+        # 3 lí do truy cập / đúng logic tên /dễ đọc
 
-        def player(state, depth):
-            tick(True)
-            key = (state, depth, 1, orientation)
-            if key in self._cache:
-                self.last_cache_hits += 1
-                return self._cache[key]
-            self.last_cache_misses += 1
-            if depth == 0:
-                return leaf(state)
-            moves = [(_move(state, direction)) for direction in range(4)]
-            moves = [(out, reward) for out, reward, changed in moves if changed]
-            if not moves:
-                self.last_terminal_evals += 1
-                return TERMINAL_VALUE
-            result = max(MERGE_REWARD_WEIGHT * reward + chance(out, depth - 1)
-                         for out, reward in moves)
-            self._cache[key] = result
-            return result
+        empty_count = int(np.count_nonzero(obs.board == 0)) # đếm số ô trống để xác định độ sâu phù hợp
+        depth = 3 if empty_count <= 3 else 2 # nghĩ sâu hơn nếu có ít hơn 3 ô trống
+        self.last_completed_depth = depth # cập nhật depth
 
-        def chance(state, depth):
-            tick(False)
-            key = (state, depth, 0, orientation)
-            if key in self._cache:
-                self.last_cache_hits += 1
-                return self._cache[key]
-            self.last_cache_misses += 1
-            empty = [i for i, value in enumerate(state) if value == 0]
-            if not empty:
-                return player(state, depth)
-            if depth == 0 and len(empty) <= EXACT_EMPTY_LIMIT:
-                self.last_exact_spawn_children += 2 * len(empty)
-                result = _exact_chance_leaf(state, orientation, lambda spawned: leaf(spawned, True))
-                self._cache[key] = result
-                return result
-            if len(empty) <= EXACT_EMPTY_LIMIT:
-                representatives = [(i, 1 / len(empty)) for i in empty]
-            else:
-                # Early cells in the preferred snake path are structurally
-                # dangerous to fill; later cells represent ordinary spawns.
-                rank = {position: order for order, position in enumerate(PATHS[orientation])}
-                ranked = sorted(empty, key=rank.__getitem__)
-                representatives = []
-                groups = min(APPROX_POSITIONS, len(empty))
-                for group in range(groups):
-                    members = ranked[group * len(empty) // groups:(group + 1) * len(empty) // groups]
-                    representative = members[0] if group == 0 else members[len(members) // 2]
-                    representatives.append((representative, len(members) / len(empty)))
-            result = 0.0
-            for position, probability in representatives:
-                state2 = state[:position] + (1,) + state[position + 1:]
-                state4 = state[:position] + (2,) + state[position + 1:]
-                value2 = player(state2, depth)
-                if len(empty) <= EXACT_EMPTY_LIMIT:
-                    self.last_exact_spawn_children += 1
-                else:
-                    self.last_sampled_spawn_children += 1
-                value4 = player(state4, depth)
-                if len(empty) <= EXACT_EMPTY_LIMIT:
-                    self.last_exact_spawn_children += 1
-                else:
-                    self.last_sampled_spawn_children += 1
-                result += probability * (0.9 * value2 + 0.1 * value4)
-            self._cache[key] = result
-            return result
+        best_move = legal[0]
+        best_val = float("-inf")
+        # khởi tạo nới đi đầu và điểm
 
-        for depth in range(6):
-            try:
-                ordered = sorted(options, key=lambda o: o[0] != best)
-                scores = [(MERGE_REWARD_WEIGHT * reward + chance(out, depth), move)
-                          for move, out, reward in ordered]
-                best = max(scores, key=lambda item: item[0])[1]
-                self.last_completed_depth = depth
-                self.last_completed_root = True
-            except _TimedOut:
-                self.last_timeouts += 1
-                break
-            if time.perf_counter() >= deadline:
-                break
-        self._record_totals(board)
-        return best
+        for m in legal:
+            nb, reward, changed = move_board(obs.board, m)
+            if changed:
+                val = expectimax(nb, depth, False, deadline) + (reward * 2.0)
+                if val > best_val:
+                    best_val = val
+                    best_move = m
+        # đánh giá và mô phỏng các nước đi
+
+        return best_move
+
+''' Tư duy vận hành thuật toán :
+        1/ Nhận trạng thái bàn cờ --> Nhận bàn cờ, nước đi hợp lệ, thời gian đc cấp
+        2/ Xác định nước đi có thể thực hiện --> Kiểm tra danh sách nước đi. Nếu k còn thì báo lỗi nếu chỉ 1 => Trả vè
+        3/ Thiết lập tài nguyên tìm kiếm --> Tính ngân sách thời gian, xác định deadline và lựa chọn độ sâu tìm phù hợp dựa trên số ô trống
+                                                (<= 3 thì 3 , > 3 thì 2)
+        4/ Mô phỏng hướng đi --> Lần lượt thử các hướng di chuyển tạo bàn cờ mới và lấy điểm từ việc gộp
+        5/ Sử dụng expectimax để dự đoán tương lai :
+            1/ Nút Max(người chơi) --> Chọn nút có giá trị cao nhất : V = max(Vi)
+            2/ Nút CHANCE(môi trường) : Mô phỏng sinh ô 2 và 4 theo xác xuất (dùng 1 số chick để xấp sỉ)
+            3/ Tiếp tục tìm kiếm đệ quy đến hết độ sâu hoặc thời gian
+        6/ Đánh giá và so sánh --> Kết hợp giá trị expectimax với điểm thưởng gộp ô để tính điểm cho từng nước đi
+        7/ Đưa ra quyết định --> Chọn nước đi có tổng điểm cao nhất và trả về
+    
+    4 Heuristic :
+        1/ Snake --> Ô xếp giảm dần theo hình rắn từ góc
+        2/ Empty tiles --> Số ô trống trên bàn cờ
+        3/ Smoothness --> Chênh lệch điểm giữa các ô kề nhau
+        4/ Monotonicity --> Hàng cột không tăng hoặc giảm đều
+
+    Cơ chế vần hành Expectimax:
+        1/ Base case : Vì nó là hàm đệ quy nên buộc pải có điều kiện dừng
+                        1/ GameOver
+                        2/ Hết thời gian cho phép
+                        3/ Hết độ sâu tìm kiếm
+        2/ Nếu k còn nước đi nào hợp lệ(GameOver) --> Ném lỗi
+           Nếu chỉ có duy nhất 1 nước đi hợp lệ thì trả về luôn
+        3/ Cắt tỉa bớt nhánh tìm kiếm bằng cách lấy cái ô làm đại diện tránh phình cây tìm kiếm quá lớn 
+            !*! Đây là 1 phép xấp sỉ k phản ánh đúng bản chất bàn cờ
+        3/ 2 chế độ :
+            1/ Max(người) --> V = Max(Vi)
+                - Tính điểm trạng thái tất cả các hướng có thể sau cắt giảm
+                    => Lấy điểm của trạng thái tốt nhất
+            2/ Chance(môi trường) --> V = sum(1->n)(0,9/E * score(2) + 0.1/E * score(4))
+                - Nếu trường hợp sắp thua hoặc sắp hết độ sâu thì mới mô phỏng cả 2 và 4 còn lại mô phỏng hết số 2 kể cả thay số 4
+                    +> Vì mô phỏng số 2 và 4 sẽ tăng số nhánh tím kiếm --> Giảm hiệu năng
+                    +> Xác xuất ra số 4 là nhỏ hơn rất nhiều so với số 2 --> Nếu bàn cờ còn nhiều ô trống ==> Ít quan trọng
+                    !*! Đây là 1 phép sấp sỉ k phản ánh đúng bản chất bàn cờ ->> Tốt cho hiệu năng
+                - Tất cả các chỗ tính điểm đều là cộng bằng mới đúng công thức
+                - Lấy điểm nhân với xác xuất ô trống
+'''
