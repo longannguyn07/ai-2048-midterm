@@ -165,7 +165,7 @@ def expectimax(board: np.ndarray, depth: int, is_player: bool, deadline: float) 
 # =====================================================================
 
 class Agent:
-    name = "Pure-Optimized-Expectimax-Agent"
+    name = "AI3-Nhom_2"
 
     def __init__(self) -> None:
         self.last_completed_depth = 2
