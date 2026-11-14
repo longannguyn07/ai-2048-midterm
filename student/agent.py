@@ -28,7 +28,7 @@ def evaluate_board(board: np.ndarray) -> float: # Hàm tính điểm
     # lấy điểm từng ô nhân với điểm ma trận rắn -> ô điểm càng lớn trùng với trọng số lớn điểm càng cao
     # => ngầm định hướng AI dồn tile lớn nhất vào góc ròi giảm dần theo rắn
     
-    # Thưởng ô trống vừa phải để dễ xoay xở
+    # Thưởng ô trống vừa phải để AI thoáng tay xoay sở
     empty_cells = int(np.count_nonzero(board == 0))
     # đếm số ô có điểm = 0 <=> trồng --> bằng 0 vì engine cái thế
     empty_score = empty_cells * 20000.0
@@ -165,7 +165,7 @@ def expectimax(board: np.ndarray, depth: int, is_player: bool, deadline: float) 
 # =====================================================================
 
 class Agent:
-    name = "AI3-Nhom_2"
+    name = "Pure-Optimized-Expectimax-Agent"
 
     def __init__(self) -> None:
         self.last_completed_depth = 2
